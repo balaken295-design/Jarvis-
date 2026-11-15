@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS</title>
+<style>
+  :root { --c:#2de2ff; --bg:#02070d; --dim:#0b3a4d; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(circle at 50% 45%, #08263a, var(--bg) 72%);
+         color:var(--c); font-family:"Segoe UI",system-ui,sans-serif; display:flex; flex-direction:column; align-items:center; }
+  header { text-align:center; padding:14px 0 0; }
+  h1 { letter-spacing:.6em; font-weight:300; margin:0; font-size:22px; text-shadow:0 0 14px var(--c); }
+  #status { letter-spacing:.2em; font-size:12px; opacity:.8; margin-top:4px; text-transform:uppercase; }
+  main { display:grid; grid-template-columns:250px minmax(300px,1fr) 340px; gap:18px; width:min(1500px,98vw); flex:1; align-items:center; padding:8px 0 14px; }
+  @media (max-width:1000px) { main { grid-template-columns:1fr; } }
+  .panel { border:1px solid #124; border-radius:12px; background:#04121e88; padding:6px 16px 10px; }
+  .row { display:grid; grid-template-columns:1fr auto; gap:3px 8px; margin:12px 0; font-size:12px; letter-spacing:.14em; }
+  .row b { font-family:Consolas,monospace; font-weight:400; font-size:14px; }
+  .row i { grid-column:1/3; height:4px; background:var(--dim); display:block; }
+  .row u { display:block; height:100%; width:0; background:var(--c); box-shadow:0 0 8px var(--c); transition:width .6s; }
+  canvas { width:100%; max-width:640px; max-height:78vh; aspect-ratio:1; display:block; margin:auto; }
+  #log { height:50vh; overflow-y:auto; padding:10px 14px; border:1px solid #124; border-radius:10px; background:#04121e99; }
+  .you { color:#9fdcff; margin:6px 0; } .jar { color:var(--c); margin:6px 0; }
+  .bar { display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }
+  input { flex:1 1 100%; background:#04121e; border:1px solid #1a5a78; color:#dff; padding:12px; border-radius:8px; font-size:15px; }
+  button { flex:1; background:#062a3d; color:var(--c); border:1px solid var(--c); border-radius:8px; padding:10px 12px; font-size:15px; cursor:pointer; }
+  button.on { background:var(--c); color:#012; box-shadow:0 0 18px var(--c); }
+</style>
+</head>
+<body>
+<header><h1>JARVIS</h1><div id="status">Offline — press Listen</div></header>
+<main>
+  <section class="panel" id="left"></section>
+  <section><canvas id="orb" width="680" height="680"></canvas></section>
+  <section>
+    <div id="log"></div>
+    <div class="bar">
+      <input id="txt" placeholder="Type a command, or say “Jarvis …” / “ஜார்விஸ் …”" autocomplete="off">
+      <button id="send">Send</button><button id="lang" title="Speech language">EN</button><button id="mic">🎤 Listen</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const WAKES = ["jarvis", "jarvas", "jarviz", "ஜார்விஸ்", "ஜார்வீஸ்", "ஜார்விஸ", "ஜாவிஸ்", "ஜார்வீஸ"];
+const $ = id => document.getElementById(id);
+let state = "idle", listening = false, speaking = false, recActive = false;
+let awaiting = false, awakeUntil = 0, lang = "en-IN", t = 0;
+
+function setState(s, label) { state = s; $("status").textContent = label; }
+function idleLabel() {
+  setState(listening ? "listening" : "idle",
+    listening ? (lang === "ta-IN" ? "Listening (தமிழ்) — say “ஜார்விஸ்”" : "Listening (English) — say “Jarvis”") : "Offline — press Listen");
+}
+function log(cls, text) {
+  const d = document.createElement("div"); d.className = cls; d.textContent = (cls === "you" ? "You: " : "Jarvis: ") + text;
+  $("log").appendChild(d); $("log").scrollTop = 1e9;
+}
+
+// ---- Live system stats ----
+const ROWS = [["cpu", "CPU"], ["ram", "RAM"], ["gpu", "GPU"], ["ctemp", "CPU TEMP"], ["gtemp", "GPU TEMP"], ["disk", "DISK"], ["bat", "BATTERY"], ["net", "NETWORK"]];
+$("left").innerHTML = ROWS.map(([id, l]) => `<div class="row"><span>${l}</span><b id="v_${id}">--</b><i><u id="b_${id}"></u></i></div>`).join("");
+const D = { cpu: 0, ram: 0, gpu: 0 };   // smoothed values for the ring
+function put(id, text, pct) { $("v_" + id).textContent = text; $("b_" + id).style.width = Math.min(100, pct || 0) + "%"; }
+async function pollStats() {
+  try {
+    const s = await (await fetch("/stats")).json(); D.tcpu = s.cpu; D.tram = s.ram; D.tgpu = s.gpu ? s.gpu.load : 0;
+    put("cpu", s.cpu.toFixed(0) + "%", s.cpu); put("ram", s.ram.toFixed(0) + "%", s.ram);
+    put("gpu", s.gpu ? s.gpu.load + "%" : "N/A", s.gpu && s.gpu.load);
+    put("ctemp", s.cpu_temp != null ? s.cpu_temp + "°C" : "N/A", s.cpu_temp);
+    put("gtemp", s.gpu ? s.gpu.temp + "°C" : "N/A", s.gpu && s.gpu.temp);
+    put("disk", s.disk.toFixed(0) + "%", s.disk);
+    put("bat", s.battery ? s.battery.pct + "%" + (s.battery.plugged ? " ⚡" : "") : "AC", s.battery ? s.battery.pct : 100);
+    put("net", "↑" + s.up + " ↓" + s.down + " KB/s", 0);
+  } catch (e) {}
+}
+setInterval(pollStats, 1500); pollStats();
+
+// ---- Ring + clock ----
+const g = $("orb").getContext("2d");
+function ring(r, pct, w) {
+  g.setLineDash([]); g.lineWidth = w; g.strokeStyle = "#0b3a4d"; g.beginPath(); g.arc(340, 340, r, 0, 7); g.stroke();
+  g.strokeStyle = "#2de2ff"; g.beginPath(); g.arc(340, 340, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * pct / 100); g.stroke();
+}
+function draw() {
+  t += 0.02; g.clearRect(0, 0, 680, 680);
+  for (const k of ["cpu", "ram", "gpu"]) D[k] += ((D["t" + k] || 0) - D[k]) * 0.06;
+  const e = { idle: 0.03, listening: 0.08, thinking: 0.18, speaking: 0.14 }[state] || 0.04;
+  const p = 1 + Math.sin(t * (state === "thinking" ? 6 : 2.5)) * e;
+  g.shadowColor = "#2de2ff"; g.shadowBlur = 16;
+  g.strokeStyle = "#2de2ff"; g.setLineDash([]);
+  for (let i = 0; i < 60; i++) {           // tick marks
+    const a = i / 60 * Math.PI * 2, l = i % 5 ? 6 : 14; g.lineWidth = i % 5 ? 1 : 2; g.beginPath();
+    g.moveTo(340 + Math.cos(a) * 322, 340 + Math.sin(a) * 322); g.lineTo(340 + Math.cos(a) * (322 - l), 340 + Math.sin(a) * (322 - l)); g.stroke();
+  }
+  ring(292, D.cpu, 14); ring(268, D.ram, 10); ring(248, D.gpu, 10);
+  for (let i = 0; i < 2; i++) {            // rotating dashed rings
+    const a = t * (i ? -1.4 : 1); g.lineWidth = 3 - i; g.setLineDash(i ? [10, 8] : [50, 18]);
+    g.beginPath(); g.arc(340, 340, (212 - i * 28) * p, a, a + Math.PI * 1.7); g.stroke();
+  }
+  g.setLineDash([]);
+  const r = g.createRadialGradient(340, 340, 10, 340, 340, 150 * p); r.addColorStop(0, "#1b8fb0aa"); r.addColorStop(1, "#2de2ff00");
+  g.fillStyle = r; g.beginPath(); g.arc(340, 340, 150 * p, 0, 7); g.fill();
+  const d = new Date();                    // live clock
+  g.fillStyle = "#e9fcff"; g.textAlign = "center"; g.shadowBlur = 20;
+  g.font = "300 66px Consolas, monospace"; g.fillText(d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }), 340, 352);
+  g.font = "20px Consolas, monospace"; g.fillStyle = "#2de2ff"; g.fillText(String(d.getSeconds()).padStart(2, "0"), 340, 384);
+  g.font = "15px Segoe UI"; g.fillText(d.toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short", year: "numeric" }).toUpperCase(), 340, 310);
+  requestAnimationFrame(draw);
+}
+draw();
+
+// ---- Speech out (Tamil or English voice picked from the reply text) ----
+function speak(text) {
+  const ta = /[\u0B80-\u0BFF]/.test(text);
+  const voices = speechSynthesis.getVoices();
+  const v = voices.find(x => x.lang.toLowerCase().startsWith(ta ? "ta" : "en-in")) || voices.find(x => x.lang.toLowerCase().startsWith("en"));
+  speaking = true; setState("speaking", "Speaking");
+  try { rec && rec.stop(); } catch (e) {}
+  const u = new SpeechSynthesisUtterance(text); u.lang = ta ? "ta-IN" : "en-IN";
+  if (ta && !voices.some(x => x.lang.toLowerCase().startsWith("ta"))) $("status").textContent = "No Tamil voice installed — reply shown as text";
+  else if (v) u.voice = v;
+  const done = () => { if (!speaking) return; speaking = false; awakeUntil = Date.now() + 15000; idleLabel(); startRec(); };
+  u.onend = u.onerror = done;
+  setTimeout(done, 4000 + text.length * 130);
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+}
+
+// ---- Brain ----
+async function ask(text) {
+  if (!text) return;
+  log("you", text); setState("thinking", "Thinking…");
+  try {
+    const r = await fetch("/chat", { method: "POST", body: JSON.stringify({ message: text }) });
+    const { reply } = await r.json(); log("jar", reply); speak(reply);
+  } catch (e) { log("jar", "I can't reach my brain. Is jarvis_server.py running?"); idleLabel(); }
+}
+
+// ---- Speech in ----
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+function startRec() { if (!rec || !listening || speaking || recActive) return; try { rec.lang = lang; rec.start(); } catch (e) {} }
+if (SR) {
+  rec = new SR(); rec.continuous = true; rec.interimResults = false;
+  rec.onstart = () => { recActive = true; };
+  rec.onend = () => { recActive = false; setTimeout(startRec, 300); };
+  rec.onresult = e => {
+    if (speaking || state === "thinking") return;
+    const heard = e.results[e.results.length - 1][0].transcript.trim(), low = heard.toLowerCase();
+    let at = -1, len = 0;
+    for (const w of WAKES) { const i = low.indexOf(w.toLowerCase()); if (i >= 0 && (at < 0 || i < at)) { at = i; len = w.length; } }
+    if (at >= 0) {
+      const cmd = heard.slice(at + len).replace(/^[\s,.:!?-]+/, "");
+      if (cmd) { awaiting = false; ask(cmd); } else { awaiting = true; speak(lang === "ta-IN" ? "சொல்லுங்கள்" : "Yes?"); }
+    } else if (awaiting || Date.now() < awakeUntil) { awaiting = false; ask(heard); }
+  };
+  rec.onerror = e => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      listening = false; $("mic").classList.remove("on"); setState("idle", "Mic blocked — allow it in the address bar / app permissions");
+    }
+  };
+  setInterval(startRec, 1500);
+}
+$("mic").onclick = () => {
+  if (!SR) return setState("idle", "Use Chrome or Edge for voice");
+  listening = !listening; $("mic").classList.toggle("on", listening);
+  if (listening) { speechSynthesis.cancel(); startRec(); } else { try { rec.stop(); } catch (e) {} }
+  idleLabel();
+};
+$("lang").onclick = () => {
+  lang = lang === "en-IN" ? "ta-IN" : "en-IN"; $("lang").textContent = lang === "ta-IN" ? "தமிழ்" : "EN";
+  try { rec.stop(); } catch (e) {} idleLabel();
+};
+$("send").onclick = () => { const v = $("txt").value.trim(); $("txt").value = ""; ask(v); };
+$("txt").onkeydown = e => { if (e.key === "Enter") $("send").click(); };
+</script>
+</body>
+</html>
